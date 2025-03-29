@@ -20,6 +20,19 @@ import pymongo
 import bcrypt
 from urllib.parse import quote_plus
 
+# If you're using a service account on a cloud platform, set the credentials.
+# os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = '/path/to/your/service-account.json'
+# credentials = ee.ServiceAccountCredentials('your-service-account-email', '/path/to/your/service-account.json')
+# ee.Initialize(credentials, project='ee-adhishselva16')
+
+# If using interactive authentication (or already authenticated locally)
+try:
+    ee.Initialize(project='ee-adhishselva16')
+except Exception as e:
+    ee.Authenticate()  # This may open a browser for authentication locally
+    ee.Initialize(project='ee-adhishselva16')
+
+
 # ---------------------------
 # CUSTOM CSS: FULL SCREEN BACKGROUND, GLASSMORPHISM, MODERN TYPOGRAPHY
 # ---------------------------
