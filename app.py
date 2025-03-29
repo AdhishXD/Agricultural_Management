@@ -1,9 +1,17 @@
 ###########################################
 # app.py
-# A single-file solution with integrated MongoDB (Dark Mode – Dramatic UI)
-#  - Shows login/register pages until user logs in.
-#  - Presents main app once logged in, with a Logout button in sidebar.
+# Updated Single-File Solution with Optimizations:
+# - Ensures a running event loop.
+# - Caches heavy/network operations.
+# - Lazy-loads Earth Engine initialization.
 ###########################################
+
+import asyncio
+# Ensure an event loop exists.
+try:
+    asyncio.get_running_loop()
+except RuntimeError:
+    asyncio.set_event_loop(asyncio.new_event_loop())
 
 import os
 import certifi
@@ -14,28 +22,10 @@ import streamlit.components.v1 as components
 import requests
 import numpy as np
 import pandas as pd
-import ee
 import datetime
 import pymongo
 import bcrypt
 from urllib.parse import quote_plus
-import asyncio
-
-# If you're using a service account on a cloud platform, set the credentials.
-# os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = '/path/to/your/service-account.json'
-# credentials = ee.ServiceAccountCredentials('your-service-account-email', '/path/to/your/service-account.json')
-# ee.Initialize(credentials, project='ee-adhishselva16')
-
-# If using interactive authentication (or already authenticated locally)
-try:
-    ee.Initialize(project='ee-adhishselva16')
-except Exception as e:
-    ee.Authenticate()  # This may open a browser for authentication locally
-    ee.Initialize(project='ee-adhishselva16')
-try:
-    asyncio.get_running_loop()
-except RuntimeError:
-    asyncio.set_event_loop(asyncio.new_event_loop())
 
 # ---------------------------
 # CUSTOM CSS: FULL SCREEN BACKGROUND, GLASSMORPHISM, MODERN TYPOGRAPHY
@@ -43,7 +33,6 @@ except RuntimeError:
 custom_css = """
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
-
 html, body {
     height: 100%;
     margin: 0;
@@ -75,7 +64,6 @@ header p {
     margin: 0.5rem 0 0;
     color: #aaa;
 }
-
 .card {
     background: rgba(255, 255, 255, 0.1);
     border-radius: 16px;
@@ -141,13 +129,20 @@ def show_header():
     )
 
 # ---------------------------
-# 0. INITIALIZE EARTH ENGINE
+# 0. EARTH ENGINE INITIALIZATION (LAZY LOADED)
 # ---------------------------
-try:
-    ee.Initialize(project='ee-adhishselva16')
-except Exception as e:
-    ee.Authenticate()
-    ee.Initialize(project='ee-adhishselva16')
+@st.cache_resource(show_spinner=False)
+def initialize_ee():
+    import ee
+    try:
+        ee.Initialize(project='ee-adhishselva16')
+    except Exception as e:
+        # For local interactive sessions:
+        ee.Authenticate()
+        ee.Initialize(project='ee-adhishselva16')
+    return ee
+
+ee = initialize_ee()  # This will run only once and cache the result.
 
 # ---------------------------
 # 1. SET UP MONGODB CONNECTION
@@ -177,8 +172,10 @@ default_crop_prices = {
 soil_types = ["Sandy", "Loamy", "Clay", "Silty"]
 
 # ---------------------------
-# 3. HELPER FUNCTIONS (Weather, NDVI, Soil, Shops)
+# 3. HELPER FUNCTIONS (Cached Where Appropriate)
 # ---------------------------
+
+@st.cache_data(ttl=300)
 def get_weather_data(city_name):
     geo_url = "https://nominatim.openstreetmap.org/search"
     params_geo = {"city": city_name, "country": "India", "format": "json"}
@@ -207,6 +204,7 @@ def get_weather_data(city_name):
     current_precip = hourly_precip[hourly_times.index(current_time)] if current_time in hourly_times else 0
     return current_temp, current_precip, lat, lon, hourly_precip, hourly_times
 
+@st.cache_data(ttl=600)
 def get_real_ndvi(lat, lon):
     point = ee.Geometry.Point(lon, lat)
     region = point.buffer(5000)
@@ -226,6 +224,7 @@ def get_real_ndvi(lat, lon):
     ndvi_value = ee.Number(ndvi_dict.get('NDVI')).getInfo()
     return ndvi_value
 
+@st.cache_data(ttl=600)
 def get_soil_type(lat, lon):
     url = "https://rest.isric.org/soilgrids/v2.0/properties/query"
     params = {"lat": lat, "lon": lon, "property": "sand,clay,silt", "depth": "0-5cm"}
@@ -262,6 +261,7 @@ def get_soil_type(lat, lon):
     except Exception:
         return None
 
+@st.cache_data(ttl=600)
 def reverse_geocode(lat, lon):
     url = "https://nominatim.openstreetmap.org/reverse"
     params = {"format": "jsonv2", "lat": lat, "lon": lon, "zoom": 18, "addressdetails": 1}
@@ -270,6 +270,7 @@ def reverse_geocode(lat, lon):
         return r.json().get("display_name", "Address not available")
     return "Address not available"
 
+@st.cache_data(ttl=600)
 def get_live_shop_list(lat, lon):
     overpass_url = "http://overpass-api.de/api/interpreter"
     query = f"""
@@ -393,7 +394,6 @@ def show_login():
         else:
             st.error(msg)
     st.markdown("<hr>", unsafe_allow_html=True)
-    st.markdown("<div style='text-align:center;'>Don't have an account? <a href='#' style='color:#4a90e2;' onclick=\"window.parent.postMessage({page:'register'}, '*')\">Register here</a></div>", unsafe_allow_html=True)
     if st.button("Go to Registration"):
         st.session_state.page = "register"
 
@@ -411,7 +411,6 @@ def show_register():
             st.session_state.page = "login"
         else:
             st.error(msg)
-    st.markdown("<hr>", unsafe_allow_html=True)
     if st.button("Back to Login"):
         st.session_state.page = "login"
 
