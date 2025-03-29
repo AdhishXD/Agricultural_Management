@@ -19,6 +19,7 @@ import datetime
 import pymongo
 import bcrypt
 from urllib.parse import quote_plus
+import asyncio
 
 # If you're using a service account on a cloud platform, set the credentials.
 # os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = '/path/to/your/service-account.json'
@@ -31,7 +32,10 @@ try:
 except Exception as e:
     ee.Authenticate()  # This may open a browser for authentication locally
     ee.Initialize(project='ee-adhishselva16')
-
+try:
+    asyncio.get_running_loop()
+except RuntimeError:
+    asyncio.set_event_loop(asyncio.new_event_loop())
 
 # ---------------------------
 # CUSTOM CSS: FULL SCREEN BACKGROUND, GLASSMORPHISM, MODERN TYPOGRAPHY
