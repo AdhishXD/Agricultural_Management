@@ -1,0 +1,9 @@
+earthengine-api
+streamlit
+numpy
+pandas
+pymongo
+certifi
+bcrypt
+requests
+earthengine-api
