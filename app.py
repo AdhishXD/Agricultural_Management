@@ -1,9 +1,10 @@
 ###########################################
 # app.py
-# Updated Single-File Solution with Optimizations:
-# - Ensures a running event loop.
-# - Caches heavy/network operations.
-# - Lazy-loads Earth Engine initialization.
+# A single-file solution with integrated MongoDB and an AI model
+# (Dark Mode – Dramatic UI)
+#  - Shows login/register pages until user logs in.
+#  - Presents main app once logged in, with a Logout button in sidebar.
+#  - Trains a Random Forest multioutput model on dummy data to predict fertilizer & pesticide recommendations.
 ###########################################
 
 import asyncio
@@ -22,10 +23,27 @@ import streamlit.components.v1 as components
 import requests
 import numpy as np
 import pandas as pd
+import ee
 import datetime
 import pymongo
 import bcrypt
 from urllib.parse import quote_plus
+import pickle
+
+# For AI model training
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.multioutput import MultiOutputClassifier
+from sklearn.model_selection import train_test_split
+
+try:
+    ee.Initialize(project='ee-adhishselva16')
+except Exception as e:
+    ee.Authenticate()  # This may open a browser for authentication locally
+    ee.Initialize(project='ee-adhishselva16')
+try:
+    asyncio.get_running_loop()
+except RuntimeError:
+    asyncio.set_event_loop(asyncio.new_event_loop())
 
 # ---------------------------
 # CUSTOM CSS: FULL SCREEN BACKGROUND, GLASSMORPHISM, MODERN TYPOGRAPHY
@@ -33,6 +51,7 @@ from urllib.parse import quote_plus
 custom_css = """
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+
 html, body {
     height: 100%;
     margin: 0;
@@ -64,6 +83,7 @@ header p {
     margin: 0.5rem 0 0;
     color: #aaa;
 }
+
 .card {
     background: rgba(255, 255, 255, 0.1);
     border-radius: 16px;
@@ -129,27 +149,20 @@ def show_header():
     )
 
 # ---------------------------
-# 0. EARTH ENGINE INITIALIZATION (LAZY LOADED)
+# 0. INITIALIZE EARTH ENGINE
 # ---------------------------
-@st.cache_resource(show_spinner=False)
-def initialize_ee():
-    import ee
-    try:
-        ee.Initialize(project='ee-adhishselva16')
-    except Exception as e:
-        # For local interactive sessions:
-        ee.Authenticate()
-        ee.Initialize(project='ee-adhishselva16')
-    return ee
-
-ee = initialize_ee()  # This will run only once and cache the result.
+try:
+    ee.Initialize(project='ee-adhishselva16')
+except Exception as e:
+    ee.Authenticate()
+    ee.Initialize(project='ee-adhishselva16')
 
 # ---------------------------
 # 1. SET UP MONGODB CONNECTION
 # ---------------------------
-username = quote_plus("soveetprusty")
-password = quote_plus("@Noobdamaster69")
-connection_string = f"mongodb+srv://{username}:{password}@cluster0.bjzstq0.mongodb.net/?retryWrites=true&w=majority"
+username_db = quote_plus("soveetprusty")
+password_db = quote_plus("@Noobdamaster69")
+connection_string = f"mongodb+srv://{username_db}:{password_db}@cluster0.bjzstq0.mongodb.net/?retryWrites=true&w=majority"
 client = pymongo.MongoClient(connection_string)
 db = client["agri_app"]
 farmers_col = db["farmers"]
@@ -172,10 +185,8 @@ default_crop_prices = {
 soil_types = ["Sandy", "Loamy", "Clay", "Silty"]
 
 # ---------------------------
-# 3. HELPER FUNCTIONS (Cached Where Appropriate)
+# 3. HELPER FUNCTIONS (Weather, NDVI, Soil, Shops)
 # ---------------------------
-
-@st.cache_data(ttl=300)
 def get_weather_data(city_name):
     geo_url = "https://nominatim.openstreetmap.org/search"
     params_geo = {"city": city_name, "country": "India", "format": "json"}
@@ -204,7 +215,6 @@ def get_weather_data(city_name):
     current_precip = hourly_precip[hourly_times.index(current_time)] if current_time in hourly_times else 0
     return current_temp, current_precip, lat, lon, hourly_precip, hourly_times
 
-@st.cache_data(ttl=600)
 def get_real_ndvi(lat, lon):
     point = ee.Geometry.Point(lon, lat)
     region = point.buffer(5000)
@@ -224,7 +234,6 @@ def get_real_ndvi(lat, lon):
     ndvi_value = ee.Number(ndvi_dict.get('NDVI')).getInfo()
     return ndvi_value
 
-@st.cache_data(ttl=600)
 def get_soil_type(lat, lon):
     url = "https://rest.isric.org/soilgrids/v2.0/properties/query"
     params = {"lat": lat, "lon": lon, "property": "sand,clay,silt", "depth": "0-5cm"}
@@ -261,7 +270,6 @@ def get_soil_type(lat, lon):
     except Exception:
         return None
 
-@st.cache_data(ttl=600)
 def reverse_geocode(lat, lon):
     url = "https://nominatim.openstreetmap.org/reverse"
     params = {"format": "jsonv2", "lat": lat, "lon": lon, "zoom": 18, "addressdetails": 1}
@@ -270,7 +278,6 @@ def reverse_geocode(lat, lon):
         return r.json().get("display_name", "Address not available")
     return "Address not available"
 
-@st.cache_data(ttl=600)
 def get_live_shop_list(lat, lon):
     overpass_url = "http://overpass-api.de/api/interpreter"
     query = f"""
@@ -332,6 +339,66 @@ def style_shops_dataframe(shops_df):
                            ])
     return styled_df
 
+# ---------------------------
+# AI MODEL TRAINING & PREDICTION
+# ---------------------------
+def train_ai_model(n_samples=200, random_state=42):
+    """
+    Train a Random Forest multi-output classifier on dummy data.
+    Features: [NDVI, soil_value]
+    Targets:
+      - Fertilizer: 0: High NPK mix, 1: Moderate NPK mix, 2: Minimal fertilizer needed
+      - Pesticide: 0: Broad-spectrum, 1: Targeted, 2: No pesticide required
+    For demo purposes, labels are determined by simple NDVI thresholds.
+    """
+    np.random.seed(random_state)
+    # Generate random NDVI values between 0.3 and 0.9
+    ndvi = np.random.uniform(0.3, 0.9, n_samples)
+    # Random soil types encoded as: 0: Sandy, 1: Loamy, 2: Clay, 3: Silty
+    soil = np.random.randint(0, 4, n_samples)
+    # Feature matrix
+    X = np.column_stack((ndvi, soil))
+    # Define fertilizer labels based on NDVI thresholds
+    y_fert = np.where(ndvi < 0.5, 0, np.where(ndvi < 0.7, 1, 2))
+    # Define pesticide labels similarly (for demo, slight variation)
+    y_pest = np.where(ndvi < 0.5, 0, np.where(ndvi < 0.8, 1, 2))
+    # Combine targets into a 2D array
+    y = np.column_stack((y_fert, y_pest))
+    
+    # Split the data (optional, but here we train on all data for demo)
+    # X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=random_state)
+    
+    # Train a multi-output Random Forest Classifier
+    base_clf = RandomForestClassifier(n_estimators=50, random_state=random_state)
+    model = MultiOutputClassifier(base_clf)
+    model.fit(X, y)
+    return model
+
+# Train the model when the app starts
+ai_model = train_ai_model()
+
+# Mappings for prediction outputs
+fert_mapping = {0: "High NPK mix (Urea, DAP, MOP)", 1: "Moderate NPK mix (Balanced fertilizer)", 2: "Minimal fertilizer needed"}
+pest_mapping = {0: "Broad-spectrum insecticide (e.g., Chlorpyrifos)", 1: "Targeted pesticide (e.g., Imidacloprid)", 2: "No pesticide required"}
+
+def predict_fertilizer_pesticide(ndvi, soil_type):
+    """
+    Use the trained AI model to predict recommendations.
+    """
+    # Map soil type string to numeric value
+    soil_mapping = {"Sandy": 0, "Loamy": 1, "Clay": 2, "Silty": 3}
+    soil_value = soil_mapping.get(soil_type, 1)
+    feature = np.array([[ndvi, soil_value]])
+    preds = ai_model.predict(feature)
+    fert_pred = int(preds[0][0])
+    pest_pred = int(preds[0][1])
+    fertilizer = fert_mapping.get(fert_pred, "Moderate NPK mix (Balanced fertilizer)")
+    pesticide = pest_mapping.get(pest_pred, "Targeted pesticide (e.g., Imidacloprid)")
+    return fertilizer, pesticide
+
+# ---------------------------
+# ORIGINAL RULE-BASED FUNCTION (Fallback)
+# ---------------------------
 def get_fertilizer_pesticide_recommendations(ndvi, soil_type):
     if ndvi < 0.5:
         fert = "High NPK mix (Urea, DAP, MOP)"
@@ -394,6 +461,7 @@ def show_login():
         else:
             st.error(msg)
     st.markdown("<hr>", unsafe_allow_html=True)
+    st.markdown("<div style='text-align:center;'>Don't have an account? <a href='#' style='color:#4a90e2;'>Register here</a></div>", unsafe_allow_html=True)
     if st.button("Go to Registration"):
         st.session_state.page = "register"
 
@@ -411,6 +479,7 @@ def show_register():
             st.session_state.page = "login"
         else:
             st.error(msg)
+    st.markdown("<hr>", unsafe_allow_html=True)
     if st.button("Back to Login"):
         st.session_state.page = "login"
 
@@ -428,7 +497,7 @@ def show_main_app():
         - Real-time weather data via Open-Meteo
         - NDVI data from Sentinel-2 imagery (last 30 days)
         - Irrigation recommendations based on temperature and rainfall
-        - Fertilizer and pesticide suggestions
+        - **AI-driven fertilizer and pesticide suggestions**
         - Satellite view and nearby agro-shops
         - Inventory management for crops and pesticides
         """
@@ -480,7 +549,8 @@ def show_main_app():
             if ndvi_val is not None:
                 soil_selected = st.selectbox("Select Soil Type:", soil_types, key='soil_for_fert')
                 st.subheader("Fertilizer & Pesticide Recommendations")
-                fertilizer, pesticide = get_fertilizer_pesticide_recommendations(ndvi_val, soil_selected)
+                # Use the AI model for prediction
+                fertilizer, pesticide = predict_fertilizer_pesticide(ndvi_val, soil_selected)
                 st.write(f"**Soil Type:** {soil_selected}")
                 st.write(f"**Real NDVI:** {ndvi_val:.2f}")
                 st.write(f"**Fertilizer Recommendation:** {fertilizer}")
