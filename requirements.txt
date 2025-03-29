@@ -6,3 +6,4 @@ pymongo
 certifi
 bcrypt
 requests
+scikit-learn
