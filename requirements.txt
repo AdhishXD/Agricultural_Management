@@ -1,9 +1,14 @@
-earthengine-api
 streamlit
+certifi
+requests
 numpy
 pandas
+earthengine-api
 pymongo
-certifi
 bcrypt
-requests
+googletrans==4.0.0-rc1
+pillow
+joblib
+tensorflow
 scikit-learn
+watchdog
