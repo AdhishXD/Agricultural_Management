@@ -4,7 +4,7 @@
 #   - MongoDB integration for authentication & inventory management
 #   - Weather, NDVI, and Satellite view for Irrigation Recommendations
 #   - Fertilizer & Pesticide Recommendations (using AI model)
-#   - Inventory Management for crops and pesticides
+#   - Inventory Management for crops and pesticides (with remove options)
 #   - Leaf Health Classification (Healthy vs. Not Healthy) using improved synthetic data
 #   - Yield Prediction using an AI model on synthetic data (improved to avoid negative/flat predictions)
 #   - Language translation and inline predictive city input in sidebar
@@ -330,33 +330,45 @@ def get_real_ndvi(lat, lon):
 
 @st.cache_data(show_spinner=False)
 def get_live_shop_list(lat, lon, radius=7000):
-    overpass_url = "http://overpass-api.de/api/interpreter"
-    query = f"""
-    [out:json];
-    node(around:{radius}, {lat}, {lon})["shop"];
-    out body;
-    """
-    r = requests.post(overpass_url, data=query)
-    if r.status_code != 200:
-        return pd.DataFrame()
-    data = r.json()
-    elements = data.get("elements", [])
+    exclusions = ["clothes", "apparel", "fashion", "footwear", "quarry"]
     keywords = ["agro", "farm", "agr", "hort", "garden", "agriculture"]
-    exclusions = ["clothes", "apparel", "fashion", "footwear"]
-    shops = []
-    for elem in elements:
-        tags = elem.get("tags", {})
-        name = tags.get("name", "").strip()
-        shop_tag = tags.get("shop", "").strip()
-        if not name:
-            continue
-        if any(exc in name.lower() for exc in exclusions):
-            continue
-        if not (any(k in name.lower() for k in keywords) or any(k in shop_tag.lower() for k in keywords)):
-            continue
-        addr_full = tags.get("addr:full", "").strip()
-        address = addr_full if addr_full else "Address not available"
-        shops.append({"Name": name, "Type": shop_tag, "Address": address})
+    
+    def query_shops(radius_val):
+        overpass_url = "http://overpass-api.de/api/interpreter"
+        query = f"""
+        [out:json];
+        node(around:{radius_val}, {lat}, {lon})["shop"];
+        out body;
+        """
+        r = requests.post(overpass_url, data=query)
+        if r.status_code != 200:
+            return []
+        data = r.json()
+        elements = data.get("elements", [])
+        shops = []
+        for elem in elements:
+            tags = elem.get("tags", {})
+            name = tags.get("name", "").strip()
+            shop_tag = tags.get("shop", "").strip()
+            if not name:
+                continue
+            if any(exc in name.lower() for exc in exclusions) or any(exc in shop_tag.lower() for exc in exclusions):
+                continue
+            if not (any(k in name.lower() for k in keywords) or any(k in shop_tag.lower() for k in keywords)):
+                continue
+            addr_full = tags.get("addr:full", "").strip()
+            if not addr_full:
+                street = tags.get("addr:street", "").strip()
+                city = tags.get("addr:city", "").strip()
+                postcode = tags.get("addr:postcode", "").strip()
+                addr_components = [comp for comp in [street, city, postcode] if comp]
+                addr_full = ", ".join(addr_components) if addr_components else "Address not available"
+            shops.append({"Name": name, "Type": shop_tag, "Address": addr_full})
+        return shops
+
+    shops = query_shops(radius)
+    if not shops:
+        shops = query_shops(20000)
     df = pd.DataFrame(shops)
     if not df.empty:
         df.index = np.arange(1, len(df) + 1)
@@ -672,40 +684,71 @@ def show_main_app():
         quantity = st.number_input(tr("Enter Quantity (in kg):"), min_value=0, value=0, step=1)
         price = st.number_input(tr("Enter Market Price (per kg):"), min_value=0, value=default_crop_prices[crop_selected], step=1)
         if st.button(tr("Add Crop"), key='crop_add'):
-            crop_inventory_col.insert_one({
-                "username": st.session_state.username,
-                "crop": crop_selected,
-                "quantity": quantity,
-                "price": price
-            })
-            st.success(tr("Crop inventory added."))
+            if quantity <= 0 or price <= 0:
+                st.error(tr("Please enter values greater than 0 for both quantity and price."))
+            else:
+                crop_inventory_col.insert_one({
+                    "username": st.session_state.username,
+                    "crop": crop_selected,
+                    "quantity": quantity,
+                    "price": price
+                })
+                st.success(tr("Crop inventory added."))
+    
         with ThreadPoolExecutor() as executor:
-            future_crop = executor.submit(list, crop_inventory_col.find({"username": st.session_state.username}, {"_id": 0}))
-            future_pest = executor.submit(list, pesticide_inventory_col.find({"username": st.session_state.username}, {"_id": 0}))
+            future_crop = executor.submit(list, crop_inventory_col.find({"username": st.session_state.username}))
+            future_pest = executor.submit(list, pesticide_inventory_col.find({"username": st.session_state.username}))
             user_crops = future_crop.result()
             user_pesticides = future_pest.result()
+    
         if user_crops:
             st.write(tr("### Current Crop Inventory"))
             df_crop = pd.DataFrame(user_crops)
-            df_crop.index = range(1, len(df_crop) + 1)
+            if "_id" in df_crop.columns:
+                df_crop = df_crop.drop(columns=["_id"])
+            df_crop.index = np.arange(1, len(df_crop) + 1)
             st.dataframe(df_crop)
             total_price = (df_crop["quantity"] * df_crop["price"]).sum()
             st.write(f"*{tr('Total Inventory Price')}:* {total_price}")
+            
+            for record in user_crops:
+                col1, col2 = st.columns([0.8, 0.2])
+                with col1:
+                    st.write(f"{record['crop']} - {record['quantity']} kg @ {record['price']} per kg")
+                with col2:
+                    if st.button(tr("Remove"), key=f"remove_crop_{record['_id']}"):
+                        crop_inventory_col.delete_one({"_id": record["_id"]})
+    
         st.markdown(f"<div class='section-title'><i class='fa-solid fa-box'></i><strong>{tr('Pesticide Inventory Management')}</strong></div>", unsafe_allow_html=True)
         pesticide_name = st.text_input(tr("Enter Pesticide Name:"), key='pest_name')
         pesticide_qty = st.number_input(tr("Enter Quantity (liters/kg):"), min_value=0, value=0, step=1, key='pest_qty')
         if st.button(tr("Add Pesticide"), key='pest_add'):
-            pesticide_inventory_col.insert_one({
-                "username": st.session_state.username,
-                "pesticide": pesticide_name,
-                "quantity": pesticide_qty
-            })
-            st.success(tr("Pesticide inventory added."))
+            if not pesticide_name or pesticide_qty <= 0:
+                st.error(tr("Please enter a pesticide name and a quantity greater than 0."))
+            else:
+                pesticide_inventory_col.insert_one({
+                    "username": st.session_state.username,
+                    "pesticide": pesticide_name,
+                    "quantity": pesticide_qty
+                })
+                st.success(tr("Pesticide inventory added."))
+    
         if user_pesticides:
             st.write(tr("### Current Pesticide Inventory"))
             df_pest = pd.DataFrame(user_pesticides)
-            df_pest.index = range(1, len(df_pest) + 1)
+            if "_id" in df_pest.columns:
+                df_pest = df_pest.drop(columns=["_id"])
+            df_pest.index = np.arange(1, len(df_pest) + 1)
             st.dataframe(df_pest)
+            
+            for record in user_pesticides:
+                col1, col2 = st.columns([0.8, 0.2])
+                with col1:
+                    st.write(f"{record['pesticide']} - {record['quantity']}")
+                with col2:
+                    if st.button(tr("Remove"), key=f"remove_pest_{record['_id']}"):
+                        pesticide_inventory_col.delete_one({"_id": record["_id"]})
+    
     with tab4:
         st.markdown(f"<div class='section-title'><i class='fa-solid fa-leaf'></i><strong>{tr('Leaf Health Classification')}</strong></div>", unsafe_allow_html=True)
         st.write(tr("Upload an image of a leaf to classify its health (Healthy vs. Not Healthy)."))
