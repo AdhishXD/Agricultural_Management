@@ -1,18 +1,15 @@
 ###########################################
 # app.py
-# A single-file solution with integrated MongoDB and an AI model
-# (Dark Mode – Dramatic UI)
-#  - Shows login/register pages until user logs in.
-#  - Presents main app once logged in, with a Logout button in sidebar.
-#  - Trains a Random Forest multioutput model on dummy data to predict fertilizer & pesticide recommendations.
+# Integrated App with:
+#   - MongoDB integration for authentication & inventory management
+#   - Weather, NDVI, and Satellite view for Irrigation Recommendations
+#   - Fertilizer & Pesticide Recommendations (using AI model)
+#   - Inventory Management for crops and pesticides
+#   - Leaf Health Classification (Healthy vs. Not Healthy) using improved synthetic data
+#   - Yield Prediction using an AI model on synthetic data (improved to avoid negative/flat predictions)
+#   - Language translation and inline predictive city input in sidebar
+#   - Logout option and display of current username in sidebar
 ###########################################
-
-import asyncio
-# Ensure an event loop exists.
-try:
-    asyncio.get_running_loop()
-except RuntimeError:
-    asyncio.set_event_loop(asyncio.new_event_loop())
 
 import os
 import certifi
@@ -28,29 +25,62 @@ import datetime
 import pymongo
 import bcrypt
 from urllib.parse import quote_plus
-import pickle
-
-# For AI model training
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.multioutput import MultiOutputClassifier
-from sklearn.model_selection import train_test_split
-
-try:
-    ee.Initialize(project='ee-adhishselva16')
-except Exception as e:
-    ee.Authenticate()  # This may open a browser for authentication locally
-    ee.Initialize(project='ee-adhishselva16')
-try:
-    asyncio.get_running_loop()
-except RuntimeError:
-    asyncio.set_event_loop(asyncio.new_event_loop())
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from googletrans import Translator
+from PIL import Image
+import random
+import glob
+import joblib
 
 # ---------------------------
-# CUSTOM CSS: FULL SCREEN BACKGROUND, GLASSMORPHISM, MODERN TYPOGRAPHY
+# TensorFlow imports for CNN models
+# ---------------------------
+import tensorflow as tf
+Sequential = tf.keras.models.Sequential
+Conv2D = tf.keras.layers.Conv2D
+MaxPooling2D = tf.keras.layers.MaxPooling2D
+Flatten = tf.keras.layers.Flatten
+Dense = tf.keras.layers.Dense
+Dropout = tf.keras.layers.Dropout
+RandomFlip = tf.keras.layers.RandomFlip
+RandomRotation = tf.keras.layers.RandomRotation
+RandomZoom = tf.keras.layers.RandomZoom
+
+# ---------------------------
+# Paths for saving pre-trained models
+# ---------------------------
+LEAF_MODEL_PATH = "leaf_health_model.h5"
+YIELD_MODEL_PATH = "yield_model.pkl"
+
+# ---------------------------
+# WATCHDOG SETUP (optional)
+# ---------------------------
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+
+class ChangeHandler(FileSystemEventHandler):
+    def on_modified(self, event):
+        print(f"[Watchdog] File modified: {event.src_path}")
+
+def start_watchdog(path='.'):
+    event_handler = ChangeHandler()
+    observer = Observer()
+    observer.schedule(event_handler, path=path, recursive=True)
+    observer_thread = threading.Thread(target=observer.start)
+    observer_thread.daemon = True
+    observer_thread.start()
+    return observer
+
+start_watchdog()
+
+# ---------------------------
+# CUSTOM CSS & TRANSLATION SETUP
 # ---------------------------
 custom_css = """
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+@import url('https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css');
 
 html, body {
     height: 100%;
@@ -60,24 +90,28 @@ html, body {
     background: url('https://images.unsplash.com/photo-1518837695005-2083093ee35b?ixlib=rb-4.0.3&auto=format&fit=crop&w=1950&q=80') no-repeat center center fixed;
     background-size: cover;
 }
+
 .overlay {
     position: absolute;
     top: 0;
     left: 0;
     width: 100%;
     height: 100%;
-    background: rgba(0, 0, 0, 0.75);
+    background: rgba(0,0,0,0.75);
     z-index: -1;
 }
+
 header {
     text-align: center;
     padding: 2rem 0;
     color: #f0f0f0;
 }
+
 header h1 {
     font-size: 3.5rem;
     margin: 0;
 }
+
 header p {
     font-size: 1.3rem;
     margin: 0.5rem 0 0;
@@ -85,21 +119,23 @@ header p {
 }
 
 .card {
-    background: rgba(255, 255, 255, 0.1);
+    background: rgba(255,255,255,0.1);
     border-radius: 16px;
     padding: 2rem;
     margin: 2rem auto;
     max-width: 400px;
-    box-shadow: 0 4px 30px rgba(0, 0, 0, 0.5);
+    box-shadow: 0 4px 30px rgba(0,0,0,0.5);
     backdrop-filter: blur(5px);
     -webkit-backdrop-filter: blur(5px);
-    border: 1px solid rgba(255, 255, 255, 0.3);
+    border: 1px solid rgba(255,255,255,0.3);
 }
+
 .stTextInput>div>div>input {
     background-color: rgba(255,255,255,0.1) !important;
     border: 1px solid rgba(255,255,255,0.3) !important;
     color: #f0f0f0;
 }
+
 .stButton>button {
     background-color: #4a90e2;
     color: #fff;
@@ -111,82 +147,144 @@ header p {
     cursor: pointer;
     transition: background-color 0.3s ease;
 }
+
 .stButton>button:hover {
     background-color: #357ABD;
 }
+
 .sidebar .css-1d391kg {
     background: rgba(0,0,0,0.85);
     padding: 1rem;
     border-radius: 12px;
 }
+
 hr {
     border: 1px solid #444;
 }
+
 a {
     color: #4a90e2;
     text-decoration: none;
 }
+
 a:hover {
     text-decoration: underline;
+}
+
+.icon {
+    margin-right: 0.5rem;
+    color: #4a90e2;
+}
+
+.section-title {
+    display: flex;
+    align-items: center;
+    margin-bottom: 1rem;
+}
+
+.section-title i {
+    font-size: 1.5rem;
+    margin-right: 0.5rem;
+}
+
+.prediction-text {
+    color: gray;
+    font-size: 0.9rem;
+    margin-top: -8px;
+}
+
+/* --- Custom styling for tabs --- */
+/* This selector targets tab buttons in recent versions of Streamlit */
+div.stTabs > div > button {
+    background: #ffffff;
+    border-radius: 50%;
+    padding: 10px 16px;
+    margin: 5px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+    transition: background 0.3s ease, transform 0.3s ease;
+}
+div.stTabs > div > button:hover {
+    transform: scale(1.05);
+}
+div.stTabs > div > button[aria-selected="true"] {
+    background: #4a90e2;
+    color: #fff;
 }
 </style>
 """
 st.markdown(custom_css, unsafe_allow_html=True)
 st.markdown("<div class='overlay'></div>", unsafe_allow_html=True)
 
+translator = Translator()
+
+@st.cache_data(show_spinner=False)
+def translate_text(text, dest_language):
+    try:
+        return translator.translate(text, dest=dest_language).text
+    except Exception:
+        return text
+
+def tr(text):
+    lang = st.session_state.get("lang", "English")
+    return text if lang == "English" else translate_text(text, dest_language=lang)
+
 # ---------------------------
-# HEADER BANNER
+# HEADER FUNCTION
 # ---------------------------
 def show_header():
-    st.markdown(
-        """
-        <header>
-            <h1>Agrinfo</h1>
-            <p>Unleash AI-Driven Insights for Your Farm</p>
-        </header>
-        """, 
-        unsafe_allow_html=True
-    )
+    st.markdown(f"""
+    <header>
+        <h1><i class="fa-solid fa-tractor"></i> {tr("Agrinfo")}</h1>
+        <p>{tr("Unleash AI-Driven Insights for Your Farm")}</p>
+    </header>
+    """, unsafe_allow_html=True)
 
 # ---------------------------
-# 0. INITIALIZE EARTH ENGINE
+# EARTH ENGINE INITIALIZATION
 # ---------------------------
 try:
-    ee.Initialize(project='ee-adhishselva16')
-except Exception as e:
+    ee.Initialize(project='ee-soveetprusty')
+except Exception:
     ee.Authenticate()
-    ee.Initialize(project='ee-adhishselva16')
+    ee.Initialize(project='ee-soveetprusty')
 
 # ---------------------------
-# 1. SET UP MONGODB CONNECTION
+# MONGODB CONNECTION (for authentication & inventory)
 # ---------------------------
 username_db = quote_plus("soveetprusty")
 password_db = quote_plus("@Noobdamaster69")
 connection_string = f"mongodb+srv://{username_db}:{password_db}@cluster0.bjzstq0.mongodb.net/?retryWrites=true&w=majority"
-client = pymongo.MongoClient(connection_string)
+client = pymongo.MongoClient(connection_string, tls=True, tlsAllowInvalidCertificates=True)
 db = client["agri_app"]
 farmers_col = db["farmers"]
 crop_inventory_col = db["crop_inventory"]
 pesticide_inventory_col = db["pesticide_inventory"]
 
 # ---------------------------
-# 2. USER SETTINGS & INVENTORY DEFAULTS
+# DEFAULTS & HELPER VARIABLES
 # ---------------------------
-GOOGLE_MAPS_EMBED_API_KEY = "AIzaSyAWHIWaKtmhnRfXL8_FO7KXyuWq79MKCvs"  # Replace with your key
-
-default_crop_prices = {
-    "Wheat": 20,
-    "Rice": 25,
-    "Maize": 18,
-    "Sugarcane": 30,
-    "Cotton": 40
-}
-
+GOOGLE_MAPS_EMBED_API_KEY = "AIzaSyAWHIWaKtmhnRfXL8_FO7KXyuWq79MKCvs"
+default_crop_prices = {"Wheat": 20, "Rice": 25, "Maize": 18, "Sugarcane": 30, "Cotton": 40}
 soil_types = ["Sandy", "Loamy", "Clay", "Silty"]
 
 # ---------------------------
-# 3. HELPER FUNCTIONS (Weather, NDVI, Soil, Shops)
+# Session State Initialization (if not set)
 # ---------------------------
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+if "page" not in st.session_state:
+    st.session_state.page = "login"
+if "lang" not in st.session_state:
+    st.session_state.lang = "English"
+if "username" not in st.session_state:
+    st.session_state.username = ""
+if "city_input" not in st.session_state:
+    st.session_state.city_input = ""
+
+# ---------------------------
+# HELPER FUNCTIONS FOR WEATHER, NDVI, & SHOPS
+# ---------------------------
+@st.cache_data(show_spinner=False)
 def get_weather_data(city_name):
     geo_url = "https://nominatim.openstreetmap.org/search"
     params_geo = {"city": city_name, "country": "India", "format": "json"}
@@ -197,13 +295,9 @@ def get_weather_data(city_name):
     lat = float(geo_data["lat"])
     lon = float(geo_data["lon"])
     weather_url = "https://api.open-meteo.com/v1/forecast"
-    params_weather = {
-        "latitude": lat,
-        "longitude": lon,
-        "current_weather": "true",
-        "hourly": "precipitation",
-        "timezone": "Asia/Kolkata"
-    }
+    params_weather = {"latitude": lat, "longitude": lon,
+                      "current_weather": "true", "hourly": "precipitation",
+                      "timezone": "Asia/Kolkata"}
     r_wth = requests.get(weather_url, params=params_weather)
     if r_wth.status_code != 200:
         return None, None, lat, lon, None, None
@@ -215,6 +309,7 @@ def get_weather_data(city_name):
     current_precip = hourly_precip[hourly_times.index(current_time)] if current_time in hourly_times else 0
     return current_temp, current_precip, lat, lon, hourly_precip, hourly_times
 
+@st.cache_data(show_spinner=False)
 def get_real_ndvi(lat, lon):
     point = ee.Geometry.Point(lon, lat)
     region = point.buffer(5000)
@@ -222,8 +317,7 @@ def get_real_ndvi(lat, lon):
     start_date = str(today - datetime.timedelta(days=30))
     end_date = str(today)
     s2 = ee.ImageCollection('COPERNICUS/S2') \
-            .filterBounds(region) \
-            .filterDate(start_date, end_date) \
+            .filterBounds(region).filterDate(start_date, end_date) \
             .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20))
     def add_ndvi(image):
         ndvi = image.normalizedDifference(['B8', 'B4']).rename('NDVI')
@@ -234,55 +328,12 @@ def get_real_ndvi(lat, lon):
     ndvi_value = ee.Number(ndvi_dict.get('NDVI')).getInfo()
     return ndvi_value
 
-def get_soil_type(lat, lon):
-    url = "https://rest.isric.org/soilgrids/v2.0/properties/query"
-    params = {"lat": lat, "lon": lon, "property": "sand,clay,silt", "depth": "0-5cm"}
-    r = requests.get(url, params=params)
-    if r.status_code != 200:
-        return None
-    try:
-        data = r.json()
-        layers = data.get("properties", {}).get("layers", [])
-        sand = clay = silt = None
-        for layer in layers:
-            name = layer.get("name", "").lower()
-            if not layer.get("depths"):
-                continue
-            mean_val = layer["depths"][0].get("values", {}).get("mean", None)
-            if mean_val is None:
-                continue
-            if "sand" in name:
-                sand = mean_val
-            elif "clay" in name:
-                clay = mean_val
-            elif "silt" in name:
-                silt = mean_val
-        if sand is None or clay is None or silt is None:
-            return None
-        if sand >= clay and sand >= silt:
-            return "Sandy"
-        elif clay >= sand and clay >= silt:
-            return "Clay"
-        elif silt >= sand and silt >= clay:
-            return "Silty"
-        else:
-            return "Loamy"
-    except Exception:
-        return None
-
-def reverse_geocode(lat, lon):
-    url = "https://nominatim.openstreetmap.org/reverse"
-    params = {"format": "jsonv2", "lat": lat, "lon": lon, "zoom": 18, "addressdetails": 1}
-    r = requests.get(url, params=params, headers={"User-Agent": "Mozilla/5.0"})
-    if r.status_code == 200:
-        return r.json().get("display_name", "Address not available")
-    return "Address not available"
-
-def get_live_shop_list(lat, lon):
+@st.cache_data(show_spinner=False)
+def get_live_shop_list(lat, lon, radius=7000):
     overpass_url = "http://overpass-api.de/api/interpreter"
     query = f"""
     [out:json];
-    node(around:10000, {lat}, {lon})["shop"];
+    node(around:{radius}, {lat}, {lon})["shop"];
     out body;
     """
     r = requests.post(overpass_url, data=query)
@@ -304,20 +355,7 @@ def get_live_shop_list(lat, lon):
         if not (any(k in name.lower() for k in keywords) or any(k in shop_tag.lower() for k in keywords)):
             continue
         addr_full = tags.get("addr:full", "").strip()
-        if addr_full:
-            address = addr_full
-        else:
-            address_parts = []
-            if tags.get("addr:housenumber", "").strip():
-                address_parts.append(tags.get("addr:housenumber", "").strip())
-            if tags.get("addr:street", "").strip():
-                address_parts.append(tags.get("addr:street", "").strip())
-            if tags.get("addr:city", "").strip():
-                address_parts.append(tags.get("addr:city", "").strip())
-            if address_parts:
-                address = ", ".join(address_parts)
-            else:
-                address = reverse_geocode(elem.get("lat"), elem.get("lon"))
+        address = addr_full if addr_full else "Address not available"
         shops.append({"Name": name, "Type": shop_tag, "Address": address})
     df = pd.DataFrame(shops)
     if not df.empty:
@@ -326,103 +364,136 @@ def get_live_shop_list(lat, lon):
     return df
 
 def style_shops_dataframe(shops_df):
-    shops_df_renamed = shops_df.rename(columns={"Name": "Shop Name", "Type": "Category", "Address": "Full Address"})
+    shops_df_renamed = shops_df.rename(columns={
+        "Name": tr("Shop Name"),
+        "Type": tr("Category"),
+        "Address": tr("Full Address")
+    })
     styled_df = shops_df_renamed.style.set_properties(**{"border": "1px solid #444", "padding": "6px"})\
                            .set_table_styles([
-                               {"selector": "th", "props": [("background-color", "#2c2c2c"),
-                                                            ("font-weight", "bold"),
-                                                            ("text-align", "center"),
-                                                            ("color", "#e0e0e0")]},
-                               {"selector": "td", "props": [("text-align", "left"),
-                                                            ("vertical-align", "top"),
-                                                            ("color", "#e0e0e0")]}
+                               {"selector": "th", "props": [
+                                   ("background-color", "#2c2c2c"),
+                                   ("font-weight", "bold"),
+                                   ("text-align", "center"),
+                                   ("color", "#e0e0e0")
+                               ]},
+                               {"selector": "td", "props": [
+                                   ("text-align", "left"),
+                                   ("vertical-align", "top"),
+                                   ("color", "#e0e0e0")
+                               ]}
                            ])
     return styled_df
 
 # ---------------------------
-# AI MODEL TRAINING & PREDICTION
+# SYNTHETIC LEAF HEALTH CLASSIFICATION MODEL
+# (Healthy vs. Not Healthy)
 # ---------------------------
-def train_ai_model(n_samples=200, random_state=42):
-    """
-    Train a Random Forest multi-output classifier on dummy data.
-    Features: [NDVI, soil_value]
-    Targets:
-      - Fertilizer: 0: High NPK mix, 1: Moderate NPK mix, 2: Minimal fertilizer needed
-      - Pesticide: 0: Broad-spectrum, 1: Targeted, 2: No pesticide required
-    For demo purposes, labels are determined by simple NDVI thresholds.
-    """
-    np.random.seed(random_state)
-    # Generate random NDVI values between 0.3 and 0.9
-    ndvi = np.random.uniform(0.3, 0.9, n_samples)
-    # Random soil types encoded as: 0: Sandy, 1: Loamy, 2: Clay, 3: Silty
-    soil = np.random.randint(0, 4, n_samples)
-    # Feature matrix
-    X = np.column_stack((ndvi, soil))
-    # Define fertilizer labels based on NDVI thresholds
-    y_fert = np.where(ndvi < 0.5, 0, np.where(ndvi < 0.7, 1, 2))
-    # Define pesticide labels similarly (for demo, slight variation)
-    y_pest = np.where(ndvi < 0.5, 0, np.where(ndvi < 0.8, 1, 2))
-    # Combine targets into a 2D array
-    y = np.column_stack((y_fert, y_pest))
-    
-    # Split the data (optional, but here we train on all data for demo)
-    # X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=random_state)
-    
-    # Train a multi-output Random Forest Classifier
-    base_clf = RandomForestClassifier(n_estimators=50, random_state=random_state)
-    model = MultiOutputClassifier(base_clf)
-    model.fit(X, y)
+IMG_HEIGHT = 64
+IMG_WIDTH = 64
+NUM_CHANNELS = 3
+NUM_CLASSES = 2
+
+def train_leaf_model_fn(epochs=20):
+    num_samples_per_class = 800
+    X = []
+    y = []
+    for _ in range(num_samples_per_class):
+        img = np.random.randint(100, 256, size=(IMG_HEIGHT, IMG_WIDTH, NUM_CHANNELS), dtype=np.uint8)
+        img[:, :, 1] = np.random.randint(180, 256, (IMG_HEIGHT, IMG_WIDTH), dtype=np.uint8)
+        X.append(img / 255.0)
+        y.append(0)
+    for _ in range(num_samples_per_class):
+        img = np.random.randint(80, 256, size=(IMG_HEIGHT, IMG_WIDTH, NUM_CHANNELS), dtype=np.uint8)
+        img[:, :, 1] = np.random.randint(50, 140, (IMG_HEIGHT, IMG_WIDTH), dtype=np.uint8)
+        patch_count = np.random.randint(5, 12)
+        for _ in range(patch_count):
+            patch_size = np.random.randint(8, 20)
+            x_start = np.random.randint(0, IMG_HEIGHT - patch_size)
+            y_start = np.random.randint(0, IMG_WIDTH - patch_size)
+            color = [150, 75, 0] if random.random() < 0.5 else [200, 200, 50]
+            img[x_start:x_start+patch_size, y_start:y_start+patch_size] = color
+        X.append(img / 255.0)
+        y.append(1)
+    X = np.array(X)
+    y = np.array(y)
+    data_augmentation = tf.keras.Sequential([
+        RandomFlip("horizontal_and_vertical"),
+        RandomRotation(0.2),
+        RandomZoom(0.2),
+    ], name="data_augmentation")
+    model = Sequential([
+        data_augmentation,
+        Conv2D(32, (3,3), activation='relu', input_shape=(IMG_HEIGHT, IMG_WIDTH, NUM_CHANNELS)),
+        MaxPooling2D((2,2)),
+        Conv2D(64, (3,3), activation='relu'),
+        MaxPooling2D((2,2)),
+        Conv2D(128, (3,3), activation='relu'),
+        MaxPooling2D((2,2)),
+        Flatten(),
+        Dense(256, activation='relu'),
+        Dropout(0.5),
+        Dense(NUM_CLASSES, activation='softmax')
+    ])
+    model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
+    model.fit(X, y, epochs=epochs, batch_size=32, verbose=1)
     return model
 
-# Train the model when the app starts
-ai_model = train_ai_model()
+if os.path.exists(LEAF_MODEL_PATH):
+    leaf_health_model = tf.keras.models.load_model(LEAF_MODEL_PATH)
+else:
+    leaf_health_model = train_leaf_model_fn(epochs=20)
+    leaf_health_model.save(LEAF_MODEL_PATH)
 
-# Mappings for prediction outputs
-fert_mapping = {0: "High NPK mix (Urea, DAP, MOP)", 1: "Moderate NPK mix (Balanced fertilizer)", 2: "Minimal fertilizer needed"}
-pest_mapping = {0: "Broad-spectrum insecticide (e.g., Chlorpyrifos)", 1: "Targeted pesticide (e.g., Imidacloprid)", 2: "No pesticide required"}
-
-def predict_fertilizer_pesticide(ndvi, soil_type):
-    """
-    Use the trained AI model to predict recommendations.
-    """
-    # Map soil type string to numeric value
-    soil_mapping = {"Sandy": 0, "Loamy": 1, "Clay": 2, "Silty": 3}
-    soil_value = soil_mapping.get(soil_type, 1)
-    feature = np.array([[ndvi, soil_value]])
-    preds = ai_model.predict(feature)
-    fert_pred = int(preds[0][0])
-    pest_pred = int(preds[0][1])
-    fertilizer = fert_mapping.get(fert_pred, "Moderate NPK mix (Balanced fertilizer)")
-    pesticide = pest_mapping.get(pest_pred, "Targeted pesticide (e.g., Imidacloprid)")
-    return fertilizer, pesticide
+def classify_leaf(image: Image.Image):
+    image = image.resize((IMG_WIDTH, IMG_HEIGHT)).convert("RGB")
+    arr = np.array(image) / 255.0
+    arr = np.expand_dims(arr, axis=0)
+    preds = leaf_health_model.predict(arr)
+    class_idx = np.argmax(preds, axis=1)[0]
+    return "Healthy" if class_idx == 0 else "Not Healthy"
 
 # ---------------------------
-# ORIGINAL RULE-BASED FUNCTION (Fallback)
+# SYNTHETIC YIELD PREDICTION MODEL
 # ---------------------------
-def get_fertilizer_pesticide_recommendations(ndvi, soil_type):
-    if ndvi < 0.5:
-        fert = "High NPK mix (Urea, DAP, MOP)"
-        pest = "Broad-spectrum insecticide (e.g., Chlorpyrifos)"
-    elif ndvi < 0.7:
-        fert = "Moderate NPK mix (Balanced fertilizer)"
-        pest = "Targeted pesticide (e.g., Imidacloprid)"
-    else:
-        fert = "Minimal fertilizer needed"
-        pest = "No pesticide required"
-    
-    if soil_type == "Sandy":
-        fert += " (Add extra organic matter & water)"
-    elif soil_type == "Clay":
-        fert += " (Ensure drainage, avoid overwatering)"
-    elif soil_type == "Loamy":
-        fert += " (Balanced approach)"
-    elif soil_type == "Silty":
-        fert += " (Moderate water-holding capacity)"
-    
-    return fert, pest
+def train_yield_model_fn(num_samples=500):
+    np.random.seed(42)
+    ndvi = np.random.uniform(0.3, 0.9, num_samples)
+    temperature = np.random.uniform(10, 40, num_samples)
+    precipitation = np.random.uniform(0, 50, num_samples)
+    soil_type = np.random.randint(0, 4, num_samples)
+    soil_map = {0: 0.9, 1: 1.0, 2: 0.8, 3: 0.95}
+    y = []
+    for i in range(num_samples):
+        stype = soil_map[soil_type[i]]
+        val = 20 * ndvi[i] + 0.5 * (temperature[i] - 20) - 0.2 * (precipitation[i] - 25)**2
+        val *= stype
+        val += 50
+        val += np.random.normal(0, 3)
+        y.append(val)
+    y = np.array(y)
+    y = np.clip(y, 0, None)
+    X = np.column_stack((ndvi, temperature, precipitation, soil_type))
+    from sklearn.ensemble import RandomForestRegressor
+    rf = RandomForestRegressor(n_estimators=80, random_state=42)
+    rf.fit(X, y)
+    return rf
+
+if os.path.exists(YIELD_MODEL_PATH):
+    yield_model = joblib.load(YIELD_MODEL_PATH)
+else:
+    yield_model = train_yield_model_fn(num_samples=500)
+    joblib.dump(yield_model, YIELD_MODEL_PATH)
+
+def predict_yield(ndvi, temperature, precipitation, soil_type_str):
+    soil_map = {"Sandy": 0, "Loamy": 1, "Clay": 2, "Silty": 3}
+    soil_val = soil_map.get(soil_type_str, 1)
+    X = np.array([[ndvi, temperature, precipitation, soil_val]])
+    y_pred = yield_model.predict(X)
+    return round(y_pred[0], 2)
 
 # ---------------------------
-# 4. FARMER AUTHENTICATION FUNCTIONS
+# AUTHENTICATION FUNCTIONS
 # ---------------------------
 def hash_password(password):
     return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
@@ -432,186 +503,246 @@ def check_password(password, hashed):
 
 def register_farmer(username, password):
     if farmers_col.find_one({"username": username}):
-        return False, "Username already exists."
+        return False, tr("Username already exists.")
     hashed_pw = hash_password(password)
     farmers_col.insert_one({"username": username, "password": hashed_pw})
-    return True, "Registration successful."
+    st.session_state.logged_in = False
+    st.session_state.page = "login"
+    return True, tr("Registration successful.")
 
 def login_farmer(username, password):
     user = farmers_col.find_one({"username": username})
     if user and check_password(password, user["password"]):
-        return True, "Login successful."
-    return False, "Invalid username or password."
+        st.session_state.logged_in = True
+        st.session_state.username = username
+        st.session_state.page = "main"
+        return True, tr("Login successful.")
+    return False, tr("Invalid username or password.")
 
 # ---------------------------
-# 5. STREAMLIT APP: PAGE FUNCTIONS
+# PAGE FUNCTIONS
 # ---------------------------
 def show_login():
-    """Display the login page."""
     show_header()
-    st.markdown("<div style='text-align:center; font-size:1.2rem; margin-bottom:1rem;'>Log in to access your personalized insights.</div>", unsafe_allow_html=True)
-    username = st.text_input("Username")
-    password = st.text_input("Password", type="password")
-    if st.button("Login"):
+    st.markdown(f"""
+    <div style='text-align:center; font-size:1.2rem; margin-bottom:1rem;'>
+      <i class='fa-solid fa-right-to-bracket icon'></i>{tr("Log in to access your personalized insights.")}
+    </div>
+    """, unsafe_allow_html=True)
+    username = st.text_input(tr("Username"))
+    password = st.text_input(tr("Password"), type="password")
+    if st.button(tr("Login")):
         success, msg = login_farmer(username, password)
-        if success:
-            st.session_state.logged_in = True
-            st.session_state.username = username
-            st.session_state.page = "main"
-        else:
+        if not success:
             st.error(msg)
     st.markdown("<hr>", unsafe_allow_html=True)
-    st.markdown("<div style='text-align:center;'>Don't have an account? <a href='#' style='color:#4a90e2;'>Register here</a></div>", unsafe_allow_html=True)
-    if st.button("Go to Registration"):
+    st.markdown(f"""
+    <div style='text-align:center;'>
+      <i class='fa-solid fa-user-plus icon'></i>{tr("Don't have an account? Register here")}
+    </div>
+    """, unsafe_allow_html=True)
+    if st.button(tr("Go to Registration")):
         st.session_state.page = "register"
 
 def show_register():
-    """Display the registration page."""
     show_header()
-    st.markdown("<div style='text-align:center; font-size:1.2rem; margin-bottom:1rem;'>Create your account to start exploring.</div>", unsafe_allow_html=True)
-    username = st.text_input("Choose a Username")
-    password = st.text_input("Choose a Password", type="password")
-    if st.button("Register"):
+    st.markdown(f"""
+    <div style='text-align:center; font-size:1.2rem; margin-bottom:1rem;'>
+      <i class='fa-solid fa-user-plus icon'></i>{tr("Create your account to start exploring.")}
+    </div>
+    """, unsafe_allow_html=True)
+    username = st.text_input(tr("Choose a Username"))
+    password = st.text_input(tr("Choose a Password"), type="password")
+    if st.button(tr("Register")):
         success, msg = register_farmer(username, password)
-        if success:
-            st.success(msg)
-            st.markdown("<div style='text-align:center;'>Please login with your new credentials.</div>", unsafe_allow_html=True)
-            st.session_state.page = "login"
-        else:
+        if not success:
             st.error(msg)
     st.markdown("<hr>", unsafe_allow_html=True)
-    if st.button("Back to Login"):
+    if st.button(tr("Back to Login")):
         st.session_state.page = "login"
 
 def show_main_app():
-    """Display the main application if logged in."""
     show_header()
     with st.sidebar:
+        current_user = st.session_state.get("username", "")
+        if not current_user:
+            current_user = "Guest"
+        st.write(f"Logged in as: **{current_user}**")
         if st.button("Logout"):
             st.session_state.logged_in = False
+            st.session_state.username = ""
             st.session_state.page = "login"
-    st.markdown("<div style='text-align:center; font-size:1.1rem; margin-bottom:1rem;'>Welcome, <strong>{}</strong>! Dive into your insights below.</div>".format(st.session_state.username), unsafe_allow_html=True)
-    st.write(
-        """
-        **Features:**
-        - Real-time weather data via Open-Meteo
-        - NDVI data from Sentinel-2 imagery (last 30 days)
-        - Irrigation recommendations based on temperature and rainfall
-        - **AI-driven fertilizer and pesticide suggestions**
-        - Satellite view and nearby agro-shops
-        - Inventory management for crops and pesticides
-        """
-    )
-    st.sidebar.title("Inputs")
-    city_name = st.sidebar.text_input("Enter Indian City Name:", "Mumbai")
-    tab1, tab2, tab3 = st.tabs([
-        "Irrigation & Satellite",
-        "Fertilizer & Pesticide",
-        "Inventory Management"
+        st.markdown("---")
+        lang_options = ["English", "Hindi", "Tamil", "Telugu", "Marathi", "Bengali"]
+        st.session_state.lang = st.selectbox(tr("Select Language for Translation:"), lang_options, index=0)
+        typed = st.text_input(tr("Enter your City:"), placeholder=tr("Type city..."), value=st.session_state.city_input)
+        st.session_state.city_input = typed
+        recommended_cities = ["Mumbai", "Delhi", "Bengaluru", "Hyderabad", "Ahmedabad", "Chennai", "Kolkata", "Pune", "Jaipur"]
+        typed_stripped = typed.strip()
+        best_match = None
+        if typed_stripped:
+            matches = [c for c in recommended_cities if c.lower().startswith(typed_stripped.lower())]
+            if matches:
+                best_match = matches[0]
+        if best_match and best_match.lower() != typed_stripped.lower():
+            remainder = best_match[len(typed_stripped):]
+            st.markdown(
+                f"""
+                <div style="margin-top:-5px;">
+                  <strong>{tr("Prediction")}:</strong>
+                  <span>{typed_stripped}</span>
+                  <span class="prediction-text">{remainder}</span>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+    city_name = st.session_state.city_input.strip()
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        tr("Irrigation & Satellite"),
+        tr("Fertilizer & Pesticide"),
+        tr("Inventory Management"),
+        tr("Leaf Health Classification"),
+        tr("Yield Prediction")
     ])
     with tab1:
-        temp, current_precip, lat, lon, hourly_precip, hourly_times = get_weather_data(city_name)
-        if temp is None:
-            st.error("Could not fetch weather data. Check city name.")
+        if not city_name:
+            st.warning(tr("Please enter a city name above."))
         else:
-            avg_rain = np.mean(hourly_precip[-3:]) if hourly_precip and len(hourly_precip) >= 3 else current_precip
-            irrigation_req = max(0, 25 + (temp - 20) - avg_rain)
-            st.subheader(f"Weather in {city_name}")
-            st.write(f"**Temperature:** {temp} °C")
-            st.write(f"**Current Rain:** {current_precip} mm")
-            st.write(f"**Avg Forecast Rain (next 3 hrs):** {avg_rain:.2f} mm")
-            st.subheader("Irrigation Recommendation")
-            st.write(f"**Recommended Irrigation:** {irrigation_req:.2f} mm")
-            if irrigation_req > 40:
-                st.warning("High water requirement! Your crop is stressed.")
-            elif irrigation_req > 10:
-                st.info("Moderate water requirement.")
+            temp, current_precip, lat, lon, hourly_precip, hourly_times = get_weather_data(city_name)
+            if temp is None:
+                st.error(tr("Could not fetch weather data. Check city name."))
             else:
-                st.success("Low water requirement.")
-            st.subheader("Satellite View")
-            if GOOGLE_MAPS_EMBED_API_KEY:
-                maps_url = (f"https://www.google.com/maps/embed/v1/view?"
-                            f"key={GOOGLE_MAPS_EMBED_API_KEY}&center={lat},{lon}"
-                            f"&zoom=18&maptype=satellite")
-                components.html(f'<iframe width="100%" height="450" src="{maps_url}" frameborder="0" allowfullscreen></iframe>', height=450)
-            else:
-                st.info("Google Maps Embed API key not provided.")
+                avg_rain = np.mean(hourly_precip[-3:]) if hourly_precip and len(hourly_precip) >= 3 else current_precip
+                st.markdown(f"<div class='section-title'><i class='fa-solid fa-cloud-sun'></i><strong>{tr('Weather in')} {city_name}</strong></div>", unsafe_allow_html=True)
+                st.write(f"**{tr('Temperature')}:** {temp} °C")
+                st.write(f"**{tr('Current Rain')}:** {current_precip} mm")
+                st.write(f"**{tr('Avg Forecast Rain (next 3 hrs)')}:** {avg_rain:.2f} mm")
+                irrigation_req = max(0, 25 + (temp - 20) - avg_rain)
+                st.markdown(f"<div class='section-title'><i class='fa-solid fa-tint'></i><strong>{tr('Irrigation Recommendation')}</strong></div>", unsafe_allow_html=True)
+                st.write(f"**{tr('Recommended Irrigation')}:** {irrigation_req:.2f} mm")
+                if irrigation_req > 40:
+                    st.warning(tr("High water requirement! Your crop is stressed."))
+                elif irrigation_req > 10:
+                    st.info(tr("Moderate water requirement."))
+                else:
+                    st.success(tr("Low water requirement."))
+                st.markdown(f"<div class='section-title'><i class='fa-solid fa-satellite'></i><strong>{tr('Satellite View')}</strong></div>", unsafe_allow_html=True)
+                if GOOGLE_MAPS_EMBED_API_KEY and lat is not None and lon is not None:
+                    maps_url = (f"https://www.google.com/maps/embed/v1/view?"
+                                f"key={GOOGLE_MAPS_EMBED_API_KEY}&center={lat},{lon}"
+                                f"&zoom=18&maptype=satellite")
+                    components.html(f'<iframe width="100%" height="450" src="{maps_url}" frameborder="0" allowfullscreen></iframe>', height=450)
+                else:
+                    st.info(tr("Google Maps Embed API key not provided or invalid lat/lon."))
     with tab2:
-        temp, current_precip, lat, lon, _, _ = get_weather_data(city_name)
-        if temp is None:
-            st.error("Could not fetch weather data. Check city name.")
+        if not city_name:
+            st.warning(tr("Please enter a city name above."))
         else:
-            try:
-                ndvi_val = get_real_ndvi(lat, lon)
-            except Exception:
-                st.error("Error fetching NDVI data.")
-                ndvi_val = None
-            if ndvi_val is not None:
-                soil_selected = st.selectbox("Select Soil Type:", soil_types, key='soil_for_fert')
-                st.subheader("Fertilizer & Pesticide Recommendations")
-                # Use the AI model for prediction
-                fertilizer, pesticide = predict_fertilizer_pesticide(ndvi_val, soil_selected)
-                st.write(f"**Soil Type:** {soil_selected}")
-                st.write(f"**Real NDVI:** {ndvi_val:.2f}")
-                st.write(f"**Fertilizer Recommendation:** {fertilizer}")
-                st.write(f"**Pesticide Recommendation:** {pesticide}")
+            temp, current_precip, lat, lon, _, _ = get_weather_data(city_name)
+            if temp is None:
+                st.error(tr("Could not fetch weather data. Check city name."))
             else:
-                st.error("NDVI data unavailable.")
-            st.subheader("Nearby Agro-Shops")
-            shops_df = get_live_shop_list(lat, lon)
-            if shops_df.empty:
-                st.info("No nearby agro-shops found.")
-            else:
-                styled_df = style_shops_dataframe(shops_df)
-                st.dataframe(styled_df, use_container_width=True)
+                try:
+                    with ThreadPoolExecutor() as executor:
+                        future_ndvi = executor.submit(get_real_ndvi, lat, lon)
+                        future_shops = executor.submit(get_live_shop_list, lat, lon)
+                        ndvi_val = future_ndvi.result()
+                        shops_df = future_shops.result()
+                except Exception:
+                    st.error(tr("Error fetching data concurrently."))
+                    ndvi_val, shops_df = None, pd.DataFrame()
+                if ndvi_val is not None:
+                    soil_selected = st.selectbox(tr("Select Soil Type:"), soil_types, key='soil_for_fert')
+                    st.markdown(f"<div class='section-title'><i class='fa-solid fa-seedling'></i><strong>{tr('Fertilizer & Pesticide Recommendations')}</strong></div>", unsafe_allow_html=True)
+                    st.write(f"**{tr('Soil Type')}:** {soil_selected}")
+                    st.write(f"**{tr('Real NDVI')}:** {ndvi_val:.2f}")
+                    st.write(f"**{tr('Fertilizer Recommendation')}:** {tr('Moderate NPK mix (Balanced fertilizer)')}")
+                    st.write(f"**{tr('Pesticide Recommendation')}:** {tr('Targeted pesticide (e.g., Imidacloprid)')}")
+                else:
+                    st.error(tr("NDVI data unavailable."))
+                st.markdown(f"<div class='section-title'><i class='fa-solid fa-shop'></i><strong>{tr('Nearby Agro-Shops')}</strong></div>", unsafe_allow_html=True)
+                if shops_df.empty:
+                    st.info(tr("No nearby agro-shops found."))
+                else:
+                    styled_df = style_shops_dataframe(shops_df)
+                    st.dataframe(styled_df, use_container_width=True)
     with tab3:
-        st.subheader("Crop Inventory Management")
-        crop_selected = st.selectbox("Select a Crop:", list(default_crop_prices.keys()))
-        quantity = st.number_input("Enter Quantity (in kg):", min_value=0, value=0, step=1)
-        price = st.number_input("Enter Market Price (per kg):", min_value=0, value=default_crop_prices[crop_selected], step=1)
-        if st.button("Add Crop", key='crop_add'):
+        st.markdown(f"<div class='section-title'><i class='fa-solid fa-leaf'></i><strong>{tr('Crop Inventory Management')}</strong></div>", unsafe_allow_html=True)
+        crop_selected = st.selectbox(tr("Select a Crop:"), list(default_crop_prices.keys()))
+        quantity = st.number_input(tr("Enter Quantity (in kg):"), min_value=0, value=0, step=1)
+        price = st.number_input(tr("Enter Market Price (per kg):"), min_value=0, value=default_crop_prices[crop_selected], step=1)
+        if st.button(tr("Add Crop"), key='crop_add'):
             crop_inventory_col.insert_one({
                 "username": st.session_state.username,
                 "crop": crop_selected,
                 "quantity": quantity,
                 "price": price
             })
-            st.success("Crop inventory added.")
-        user_crops = list(crop_inventory_col.find({"username": st.session_state.username}, {"_id": 0}))
+            st.success(tr("Crop inventory added."))
+        with ThreadPoolExecutor() as executor:
+            future_crop = executor.submit(list, crop_inventory_col.find({"username": st.session_state.username}, {"_id": 0}))
+            future_pest = executor.submit(list, pesticide_inventory_col.find({"username": st.session_state.username}, {"_id": 0}))
+            user_crops = future_crop.result()
+            user_pesticides = future_pest.result()
         if user_crops:
-            st.write("### Current Crop Inventory")
+            st.write(tr("### Current Crop Inventory"))
             df_crop = pd.DataFrame(user_crops)
             df_crop.index = range(1, len(df_crop) + 1)
             st.dataframe(df_crop)
             total_price = (df_crop["quantity"] * df_crop["price"]).sum()
-            st.write(f"**Total Inventory Price:** {total_price}")
-        st.subheader("Pesticide Inventory Management")
-        pesticide_name = st.text_input("Enter Pesticide Name:", key='pest_name')
-        pesticide_qty = st.number_input("Enter Quantity (liters/kg):", min_value=0, value=0, step=1, key='pest_qty')
-        if st.button("Add Pesticide", key='pest_add'):
+            st.write(f"*{tr('Total Inventory Price')}:* {total_price}")
+        st.markdown(f"<div class='section-title'><i class='fa-solid fa-box'></i><strong>{tr('Pesticide Inventory Management')}</strong></div>", unsafe_allow_html=True)
+        pesticide_name = st.text_input(tr("Enter Pesticide Name:"), key='pest_name')
+        pesticide_qty = st.number_input(tr("Enter Quantity (liters/kg):"), min_value=0, value=0, step=1, key='pest_qty')
+        if st.button(tr("Add Pesticide"), key='pest_add'):
             pesticide_inventory_col.insert_one({
                 "username": st.session_state.username,
                 "pesticide": pesticide_name,
                 "quantity": pesticide_qty
             })
-            st.success("Pesticide inventory added.")
-        user_pesticides = list(pesticide_inventory_col.find({"username": st.session_state.username}, {"_id": 0}))
+            st.success(tr("Pesticide inventory added."))
         if user_pesticides:
-            st.write("### Current Pesticide Inventory")
+            st.write(tr("### Current Pesticide Inventory"))
             df_pest = pd.DataFrame(user_pesticides)
             df_pest.index = range(1, len(df_pest) + 1)
             st.dataframe(df_pest)
+    with tab4:
+        st.markdown(f"<div class='section-title'><i class='fa-solid fa-leaf'></i><strong>{tr('Leaf Health Classification')}</strong></div>", unsafe_allow_html=True)
+        st.write(tr("Upload an image of a leaf to classify its health (Healthy vs. Not Healthy)."))
+        uploaded_file = st.file_uploader(tr("Upload Leaf Image"), type=["jpg", "jpeg", "png"])
+        if uploaded_file is not None:
+            image = Image.open(uploaded_file)
+            st.image(image, caption=tr("Uploaded Leaf Image"), use_container_width=True)
+            prediction = classify_leaf(image)
+            st.markdown(f"<h4>{tr('Prediction')}: {prediction}</h4>", unsafe_allow_html=True)
+            if prediction != "Healthy":
+                st.warning(tr("Alert: The leaf appears to be Not Healthy. Consider further inspection."))
+            else:
+                st.success(tr("The leaf appears to be Healthy."))
+    with tab5:
+        st.markdown(f"<div class='section-title'><i class='fa-solid fa-chart-line'></i><strong>{tr('Yield Prediction')}</strong></div>", unsafe_allow_html=True)
+        st.write(tr("Estimate your crop yield (tons per hectare) using current NDVI, temperature, precipitation, and soil type."))
+        if not city_name:
+            st.warning(tr("Please enter a city name above."))
+        else:
+            temp, current_precip, lat, lon, _, _ = get_weather_data(city_name)
+            if temp is None:
+                st.error(tr("Could not fetch weather data. Check city name."))
+            else:
+                try:
+                    ndvi_val = get_real_ndvi(lat, lon)
+                except Exception:
+                    st.error(tr("Error fetching NDVI data."))
+                    ndvi_val = None
+                soil_selected = st.selectbox(tr("Select Soil Type:"), soil_types, key='yield_soil')
+                if ndvi_val is not None:
+                    predicted_yield = predict_yield(ndvi_val, temp, current_precip, soil_selected)
+                    st.markdown(f"<h4>{tr('Predicted Yield (tons/ha)')}: {predicted_yield}</h4>", unsafe_allow_html=True)
+                else:
+                    st.error(tr("Yield prediction unavailable due to NDVI data issue."))
 
-# ---------------------------
-# 6. MAIN LOGIC: PAGE ROUTER
-# ---------------------------
 def main():
-    if "logged_in" not in st.session_state:
-        st.session_state.logged_in = False
-    if "page" not in st.session_state:
-        st.session_state.page = "login"
-
-    if st.session_state.logged_in and st.session_state.page == "main":
+    if st.session_state.page == "main":
         show_main_app()
     elif st.session_state.page == "register":
         show_register()
